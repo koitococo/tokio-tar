@@ -317,7 +317,7 @@ async fn extracting_duplicate_file_fail() {
             // as expected with overwrite false
             return;
         }
-        panic!("unexpected error: {:?}", err);
+        panic!("unexpected error: {err:?}");
     }
     panic!(
         "unpack() should have returned an error of kind {:?}, returned Ok",
@@ -354,7 +354,7 @@ async fn extracting_duplicate_link_fail() {
             // as expected with overwrite false
             return;
         }
-        panic!("unexpected error: {:?}", err);
+        panic!("unexpected error: {err:?}");
     }
     panic!(
         "unpack() should have returned an error of kind {:?}, returned Ok",
@@ -621,7 +621,7 @@ async fn extracting_malicious_tarball() {
         let mut a = Builder::new(evil_tar);
         async fn append<R: AsyncWrite + Send + Unpin>(a: &mut Builder<R>, path: &'static str) {
             let mut header = Header::new_gnu();
-            assert!(header.set_path(path).is_err(), "was ok: {:?}", path);
+            assert!(header.set_path(path).is_err(), "was ok: {path:?}");
             {
                 let h = header.as_gnu_mut().unwrap();
                 for (a, b) in h.name.iter_mut().zip(path.as_bytes()) {
@@ -857,7 +857,7 @@ async fn links() {
     let mut entries = t!(ar.entries());
     let link = t!(entries.next().await.unwrap());
     assert_eq!(
-        t!(link.header().link_name()).as_ref().map(|p| &**p),
+        t!(link.header().link_name()).as_deref(),
         Some(Path::new("file"))
     );
     let other = t!(entries.next().await.unwrap());
@@ -1182,8 +1182,8 @@ async fn path_separators() {
     let path = td.path().join("test");
     t!(t!(File::create(&path).await).write_all(b"test").await);
 
-    let short_path: PathBuf = std::iter::repeat("abcd").take(2).collect();
-    let long_path: PathBuf = std::iter::repeat("abcd").take(50).collect();
+    let short_path: PathBuf = std::iter::repeat_n("abcd", 2).collect();
+    let long_path: PathBuf = std::iter::repeat_n("abcd", 50).collect();
 
     // Make sure UStar headers normalize to Unix path separators
     let mut header = Header::new_ustar();
@@ -1365,7 +1365,7 @@ async fn long_path() {
 async fn unpack_path_larger_than_windows_max_path() {
     let dir_name = "iamaprettylongnameandtobepreciseiam91characterslongwhichsomethinkisreallylongandothersdonot";
     // 183 character directory name
-    let really_long_path = format!("{}{}", dir_name, dir_name);
+    let really_long_path = format!("{dir_name}{dir_name}");
     let td = t!(TempBuilder::new().prefix(&really_long_path).tempdir());
     // directory in 7z_long_path.tar is over 100 chars
     let rdr = Cursor::new(tar!("7z_long_path.tar"));
@@ -1461,8 +1461,7 @@ async fn header_size_overflow() {
     let err = entry.unwrap_err();
     assert!(
         err.to_string().contains("size overflow"),
-        "bad error: {}",
-        err
+        "bad error: {err}"
     );
 
     // back-to-back entries that would overflow also don't panic
@@ -1485,7 +1484,63 @@ async fn header_size_overflow() {
     let err = second.unwrap_err();
     assert!(
         err.to_string().contains("size overflow"),
-        "bad error: {}",
-        err
+        "bad error: {err}"
     );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn ownership_preserving() {
+    use std::os::unix::prelude::*;
+
+    let mut rdr_: Vec<u8> = Vec::new();
+    let mut ar = Builder::new(unsafe {
+        std::mem::transmute::<&mut Vec<u8>, &'static mut Vec<u8>>(&mut rdr_)
+    });
+    let data: &[u8] = &[];
+    let mut header = Header::new_gnu();
+    // file 1 with uid = 580800000, gid = 580800000
+    header.set_gid(580800000);
+    header.set_uid(580800000);
+    t!(header.set_path("iamuid580800000"));
+    header.set_size(0);
+    header.set_cksum();
+    t!(ar.append(&header, data).await);
+    // file 2 with uid = 580800001, gid = 580800000
+    header.set_uid(580800001);
+    t!(header.set_path("iamuid580800001"));
+    header.set_cksum();
+    t!(ar.append(&header, data).await);
+    // file 3 with uid = 580800002, gid = 580800002
+    header.set_gid(580800002);
+    header.set_uid(580800002);
+    t!(header.set_path("iamuid580800002"));
+    header.set_cksum();
+    t!(ar.append(&header, data).await);
+    t!(ar.finish().await);
+
+    let rdr = Cursor::new(t!(ar.into_inner().await));
+    let td = t!(TempBuilder::new().prefix("tar-rs").tempdir());
+    let mut ar = ArchiveBuilder::new(rdr)
+        .set_preserve_ownerships(true)
+        .build();
+
+    if unsafe { libc::getuid() } == 0 {
+        assert!(ar.unpack(td.path()).await.is_ok());
+        // validate against premade files
+        // iamuid580800001 has this ownership: 580800001:580800000
+        let meta = std::fs::metadata(td.path().join("iamuid580800000")).unwrap();
+        assert_eq!(meta.uid(), 580800000);
+        assert_eq!(meta.gid(), 580800000);
+        let meta = std::fs::metadata(td.path().join("iamuid580800001")).unwrap();
+        assert_eq!(meta.uid(), 580800001);
+        assert_eq!(meta.gid(), 580800000);
+        let meta = std::fs::metadata(td.path().join("iamuid580800002")).unwrap();
+        assert_eq!(meta.uid(), 580800002);
+        assert_eq!(meta.gid(), 580800002);
+    } else {
+        // it's not possible to unpack tar while preserving ownership
+        // without root permissions
+        assert!(ar.unpack(td.path()).await.is_err());
+    }
 }

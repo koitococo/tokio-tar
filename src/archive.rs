@@ -43,6 +43,7 @@ pub struct ArchiveInner<R> {
     pos: AtomicU64,
     unpack_xattrs: bool,
     preserve_permissions: bool,
+    preserve_ownerships: bool,
     preserve_mtime: bool,
     allow_external_symlinks: bool,
     overwrite: bool,
@@ -55,6 +56,7 @@ pub struct ArchiveBuilder<R: Read + Unpin> {
     obj: R,
     unpack_xattrs: bool,
     preserve_permissions: bool,
+    preserve_ownerships: bool,
     preserve_mtime: bool,
     allow_external_symlinks: bool,
     overwrite: bool,
@@ -67,6 +69,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
         ArchiveBuilder {
             unpack_xattrs: false,
             preserve_permissions: false,
+            preserve_ownerships: false,
             preserve_mtime: true,
             allow_external_symlinks: true,
             overwrite: true,
@@ -94,6 +97,16 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
     /// Unix.
     pub fn set_preserve_permissions(mut self, preserve: bool) -> Self {
         self.preserve_permissions = preserve;
+        self
+    }
+
+    /// Indicate whether the ownerships of files and directories are preserved
+    /// when unpacking this entry.
+    ///
+    /// This flag is disabled by default and is currently only implemented on
+    /// Unix.
+    pub fn set_preserve_ownerships(mut self, preserve: bool) -> Self {
+        self.preserve_ownerships = preserve;
         self
     }
 
@@ -136,6 +149,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
         let Self {
             unpack_xattrs,
             preserve_permissions,
+            preserve_ownerships,
             preserve_mtime,
             allow_external_symlinks,
             overwrite,
@@ -147,6 +161,7 @@ impl<R: Read + Unpin> ArchiveBuilder<R> {
             inner: Arc::new(ArchiveInner {
                 unpack_xattrs,
                 preserve_permissions,
+                preserve_ownerships,
                 preserve_mtime,
                 allow_external_symlinks,
                 overwrite,
@@ -165,6 +180,7 @@ impl<R: Read + Unpin> Archive<R> {
             inner: Arc::new(ArchiveInner {
                 unpack_xattrs: false,
                 preserve_permissions: false,
+                preserve_ownerships: false,
                 preserve_mtime: true,
                 allow_external_symlinks: true,
                 overwrite: true,
@@ -579,6 +595,7 @@ fn poll_next_raw<R: Read + Unpin>(
         pax_extensions: None,
         unpack_xattrs: archive.inner.unpack_xattrs,
         preserve_permissions: archive.inner.preserve_permissions,
+        preserve_ownerships: archive.inner.preserve_ownerships,
         preserve_mtime: archive.inner.preserve_mtime,
         overwrite: archive.inner.overwrite,
         allow_external_symlinks: archive.inner.allow_external_symlinks,

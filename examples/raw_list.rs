@@ -15,7 +15,7 @@ fn main() {
         let mut i = 0;
         let mut entries = ar.entries_raw().unwrap();
         while let Some(file) = entries.next().await {
-            println!("-------------------------- Entry {}", i);
+            println!("-------------------------- Entry {i}");
             let mut f = file.unwrap();
             println!("path: {}", f.path().unwrap().display());
             println!("size: {}", f.header().size().unwrap());

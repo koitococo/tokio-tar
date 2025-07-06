@@ -1,6 +1,10 @@
-use crate::fs::{normalize_absolute, normalize_relative};
 use crate::{
-    error::TarError, header::bytes2path, other, pax::pax_extensions, Archive, Header, PaxExtensions,
+    error::TarError,
+    fs::{normalize_absolute, normalize_relative},
+    header::bytes2path,
+    other,
+    pax::pax_extensions,
+    Archive, Header, PaxExtensions,
 };
 use filetime::{self, FileTime};
 use rustc_hash::FxHashSet;
@@ -53,6 +57,7 @@ pub struct EntryFields<R: Read + Unpin> {
     pub data: VecDeque<EntryIo<R>>,
     pub unpack_xattrs: bool,
     pub preserve_permissions: bool,
+    pub preserve_ownerships: bool,
     pub preserve_mtime: bool,
     pub overwrite: bool,
     pub allow_external_symlinks: bool,
@@ -119,7 +124,7 @@ impl<R: Read + Unpin> Entry<R> {
     ///
     /// It is recommended to use this method instead of inspecting the `header`
     /// directly to ensure that various archive formats are handled correctly.
-    pub fn path(&self) -> io::Result<Cow<Path>> {
+    pub fn path(&self) -> io::Result<Cow<'_, Path>> {
         self.fields.path()
     }
 
@@ -129,7 +134,7 @@ impl<R: Read + Unpin> Entry<R> {
     /// separators, and it will not always return the same value as
     /// `self.header().path_bytes()` as some archive formats have support for
     /// longer path names described in separate entries.
-    pub fn path_bytes(&self) -> Cow<[u8]> {
+    pub fn path_bytes(&self) -> Cow<'_, [u8]> {
         self.fields.path_bytes()
     }
 
@@ -146,7 +151,7 @@ impl<R: Read + Unpin> Entry<R> {
     ///
     /// It is recommended to use this method instead of inspecting the `header`
     /// directly to ensure that various archive formats are handled correctly.
-    pub fn link_name(&self) -> io::Result<Option<Cow<Path>>> {
+    pub fn link_name(&self) -> io::Result<Option<Cow<'_, Path>>> {
         self.fields.link_name()
     }
 
@@ -155,7 +160,7 @@ impl<R: Read + Unpin> Entry<R> {
     /// Note that this will not always return the same value as
     /// `self.header().link_name_bytes()` as some archive formats have support for
     /// longer path names described in separate entries.
-    pub fn link_name_bytes(&self) -> Option<Cow<[u8]>> {
+    pub fn link_name_bytes(&self) -> Option<Cow<'_, [u8]>> {
         self.fields.link_name_bytes()
     }
 
@@ -381,7 +386,7 @@ impl<R: Read + Unpin> EntryFields<R> {
         bytes2path(self.path_bytes())
     }
 
-    fn path_bytes(&self) -> Cow<[u8]> {
+    fn path_bytes(&self) -> Cow<'_, [u8]> {
         match self.long_pathname {
             Some(ref bytes) => {
                 if let Some(&0) = bytes.last() {
@@ -410,14 +415,14 @@ impl<R: Read + Unpin> EntryFields<R> {
         String::from_utf8_lossy(&self.path_bytes()).to_string()
     }
 
-    fn link_name(&self) -> io::Result<Option<Cow<Path>>> {
+    fn link_name(&self) -> io::Result<Option<Cow<'_, Path>>> {
         match self.link_name_bytes() {
             Some(bytes) => bytes2path(bytes).map(Some),
             None => Ok(None),
         }
     }
 
-    fn link_name_bytes(&self) -> Option<Cow<[u8]>> {
+    fn link_name_bytes(&self) -> Option<Cow<'_, [u8]>> {
         match self.long_linkname {
             Some(ref bytes) => {
                 if let Some(&0) = bytes.last() {
@@ -568,6 +573,26 @@ impl<R: Read + Unpin> EntryFields<R> {
                 let mtime = if mtime == 0 { 1 } else { mtime };
                 FileTime::from_unix_time(mtime as i64, 0)
             })
+        }
+
+        async fn set_perms_ownerships(
+            dst: &Path,
+            f: Option<&mut tokio::fs::File>,
+            header: &Header,
+            perms: bool,
+            ownerships: bool,
+        ) -> io::Result<()> {
+            // ownerships need to be set first to avoid stripping SUID bits in the permissions ...
+            if ownerships {
+                set_ownerships(dst, &f, header.uid()?, header.gid()?)?;
+            }
+            // ... then set permissions, SUID bits set here is kept
+            if perms {
+                if let Ok(mode) = header.mode() {
+                    set_perms(dst, f, mode).await?;
+                }
+            }
+            Ok(())
         }
 
         let kind = self.header.entry_type();
@@ -791,6 +816,14 @@ impl<R: Read + Unpin> EntryFields<R> {
                 })?;
             }
         }
+        set_perms_ownerships(
+            dst,
+            Some(&mut f),
+            &self.header,
+            self.preserve_permissions,
+            self.preserve_ownerships,
+        )
+        .await?;
         if self.preserve_permissions {
             if let Ok(mode) = self.header.mode() {
                 set_perms(dst, Some(&mut f), mode).await?;
@@ -801,17 +834,18 @@ impl<R: Read + Unpin> EntryFields<R> {
         }
         return Ok(Unpacked::File(f));
 
-        async fn set_perms(
+        fn set_ownerships(
             dst: &Path,
-            f: Option<&mut fs::File>,
-            mode: u32,
+            f: &Option<&mut tokio::fs::File>,
+            uid: u64,
+            gid: u64,
         ) -> Result<(), TarError> {
-            _set_perms(dst, f, mode).await.map_err(|e| {
+            _set_ownerships(dst, f, uid, gid).map_err(|e| {
                 TarError::new(
                     format!(
-                        "failed to set permissions to {:o} \
-                         for `{}`",
-                        mode,
+                        "failed to set ownerships to uid={:?}, gid={:?} for `{}`",
+                        uid,
+                        gid,
                         dst.display()
                     ),
                     e,
@@ -820,6 +854,66 @@ impl<R: Read + Unpin> EntryFields<R> {
         }
 
         #[cfg(unix)]
+        fn _set_ownerships(
+            dst: &Path,
+            f: &Option<&mut tokio::fs::File>,
+            uid: u64,
+            gid: u64,
+        ) -> io::Result<()> {
+            use std::{convert::TryInto, os::unix::prelude::*};
+
+            let uid: libc::uid_t = uid
+                .try_into()
+                .map_err(|_| io::Error::other(format!("UID {uid} is too large!")))?;
+            let gid: libc::gid_t = gid
+                .try_into()
+                .map_err(|_| io::Error::other(format!("GID {gid} is too large!")))?;
+            match f {
+                Some(f) => unsafe {
+                    let fd = f.as_raw_fd();
+                    if libc::fchown(fd, uid, gid) != 0 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                },
+                None => unsafe {
+                    let path = std::ffi::CString::new(dst.as_os_str().as_bytes()).map_err(|e| {
+                        io::Error::other(format!("path contains null character: {e:?}"))
+                    })?;
+                    if libc::lchown(path.as_ptr(), uid, gid) != 0 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                },
+            }
+        }
+
+        // Windows does not support posix numeric ownership IDs
+        #[cfg(any(windows, target_arch = "wasm32"))]
+        fn _set_ownerships(_: &Path, _: &Option<&mut fs::File>, _: u64, _: u64) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn set_perms(
+            dst: &Path,
+            f: Option<&mut fs::File>,
+            mode: u32,
+        ) -> Result<(), TarError> {
+            _set_perms(dst, f, mode).await.map_err(|e| {
+                TarError::new(
+                    format!(
+                        "failed to set permissions to {:o} for `{}`",
+                        mode,
+                        dst.display()
+                    ),
+                    e,
+                )
+            })
+        }
+
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
         async fn _set_perms(dst: &Path, f: Option<&mut fs::File>, mode: u32) -> io::Result<()> {
             use std::os::unix::prelude::*;
 
@@ -851,7 +945,11 @@ impl<R: Read + Unpin> EntryFields<R> {
 
         #[cfg(target_arch = "wasm32")]
         #[allow(unused_variables)]
-        async fn _set_perms(dst: &Path, f: Option<&mut fs::File>, mode: u32) -> io::Result<()> {
+        async fn _set_perms(
+            dst: &Path,
+            f: Option<&mut std::fs::File>,
+            mode: u32,
+        ) -> io::Result<()> {
             Err(io::Error::new(io::ErrorKind::Other, "Not implemented"))
         }
 
@@ -879,13 +977,11 @@ impl<R: Read + Unpin> EntryFields<R> {
                 xattr::set(dst, key, value).map_err(|e| {
                     TarError::new(
                         format!(
-                            "failed to set extended \
-                             attributes to {}. \
-                             Xattrs: key={:?}, value={:?}.",
-                            dst.display(),
-                            key,
-                            String::from_utf8_lossy(value)
-                        ),
+              "failed to set extended attributes to {}. Xattrs: key={:?}, value={:?}.",
+              dst.display(),
+              key,
+              String::from_utf8_lossy(value)
+            ),
                         e,
                     )
                 })?;
@@ -936,7 +1032,7 @@ impl<R: Read + Unpin> EntryFields<R> {
                     dst.display()
                 ),
                 // TODO: use ErrorKind::InvalidInput here? (minor breaking change)
-                Error::new(ErrorKind::Other, "Invalid argument"),
+                Error::other("Invalid argument"),
             );
             return Err(err.into());
         }
