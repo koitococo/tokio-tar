@@ -7,7 +7,7 @@ use std::{
     borrow::Cow,
     fmt,
     fs::Metadata,
-    iter::{once, repeat, repeat_n},
+    iter::{self, once, repeat},
     mem,
     path::{Component, Path, PathBuf},
     str,
