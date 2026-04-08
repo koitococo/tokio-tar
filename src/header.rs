@@ -7,7 +7,7 @@ use std::{
     borrow::Cow,
     fmt,
     fs::Metadata,
-    iter::{once, repeat},
+    iter::{once, repeat, repeat_n},
     mem,
     path::{Component, Path, PathBuf},
     str,
@@ -728,7 +728,7 @@ impl Header {
         let len = old.cksum.len();
         self.bytes[0..offset]
             .iter()
-            .chain(std::iter::repeat_n(&b' ', len))
+            .chain(iter::repeat_n(&b' ', len))
             .chain(&self.bytes[offset + len..])
             .fold(0, |a, b| a + (*b as u32))
     }
@@ -1457,7 +1457,7 @@ fn num_field_wrapper_from(src: &[u8]) -> io::Result<u64> {
 fn numeric_extended_into(dst: &mut [u8], src: u64) {
     let len: usize = dst.len();
     for (slot, val) in dst.iter_mut().zip(
-        std::iter::repeat_n(0, len - 8) // to zero init extra bytes
+        iter::repeat_n(0, len - 8) // to zero init extra bytes
             .chain((0..8).rev().map(|x| ((src >> (8 * x)) & 0xff) as u8)),
     ) {
         *slot = val;
@@ -1605,7 +1605,7 @@ fn ends_with_slash(p: &Path) -> bool {
 }
 
 #[cfg(any(windows, target_arch = "wasm32"))]
-pub fn path2bytes(p: &Path) -> io::Result<Cow<[u8]>> {
+pub fn path2bytes(p: &Path) -> io::Result<Cow<'_, [u8]>> {
     p.as_os_str()
         .to_str()
         .map(|s| s.as_bytes())

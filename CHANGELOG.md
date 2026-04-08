@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.6
+
+* Fixed a parser desynchronization vulnerability when reading tar archives that
+  contain mismatched size information in PAX/ustar headers.
+
+    This vulnerability is being tracked as GHSA-j5gw-2vrg-8fgx
+    and CVE-2025-62518.
+
+## 0.5.5
+
+* This is a corrective release for 0.5.4 to fix a debugging artifact that
+  was accidentally left in the release.
+
+## 0.5.4
+
+* Fixed a path traversal vulnerability when using the `unpack_in_raw` API
+  by @charliermarsh
+
+    This vulnerability is being tracked as GHSA-3wgq-wrwc-vqmv.
+
+## 0.5.3
+
+* Expose `TarError` publicly by @konstin in https://github.com/astral-sh/tokio-tar/pull/52
+
 ## 0.5.2
 
 * Enable opt-in to deny creation of symlinks outside target directory by @charliermarsh in https://github.com/astral-sh/tokio-tar/pull/46

@@ -18,6 +18,7 @@
 //     all just super thin wrappers (e.g. easy to codegen).
 
 #![deny(missing_docs)]
+#![deny(clippy::print_stderr, clippy::print_stdout)]
 
 use std::io::Error;
 
@@ -26,6 +27,7 @@ pub use crate::{
     builder::Builder,
     entry::{Entry, Unpacked},
     entry_type::EntryType,
+    error::TarError,
     header::{
         GnuExtSparseHeader, GnuHeader, GnuSparseHeader, Header, HeaderMode, OldHeader, UstarHeader,
     },
